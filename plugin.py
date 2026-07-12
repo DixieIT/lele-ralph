@@ -8,7 +8,13 @@ Commands:
   /ralph <preset> <prompt>  — start a loop
   /ralph stop               — stop the current loop
   /ralph status             — show loop status
+  /ralph pause              — pause the current loop
+  /ralph resume             — resume a paused loop
+  /ralph steer <msg>        — inject guidance into the current hat
+  /ralph history            — show iteration history
+  /ralph loops              — browse past loop records
   /ralph presets            — list available presets
+  /plan <idea>              — start a PDD planning session
 
 Tools:
   start_ralph_loop({preset, prompt}) — LLM-callable loop start
@@ -25,6 +31,7 @@ import time
 import threading
 from pathlib import Path
 
+import json
 import yaml
 
 from lele_harness.engine.config import log
@@ -40,6 +47,7 @@ _loop_state: dict | None = None
 _widget = None
 _lock = threading.Lock()
 _do_steer = lambda _: None  # set by register()
+_plan_active = False
 
 
 # ── Preset loading ─────────────────────────────────────────────────────────────
@@ -155,6 +163,68 @@ def _find_hat_for_event(event: str, preset: dict) -> str | None:
     return None
 
 
+def _validate_preset(name: str, preset: dict) -> list[dict]:
+    """Validate preset structure. Matches pi-ralph's validatePreset."""
+    issues = []
+    hat_keys = list(preset["hats"].keys())
+    for key, hat in preset["hats"].items():
+        if not hat.get("instructions"):
+            issues.append({"level": "error", "message": f'[{name}] hat "{key}" has no instructions'})
+        if len(hat.get("triggers", [])) == 0:
+            issues.append({"level": "error", "message": f'[{name}] hat "{key}" has no triggers'})
+        if len(hat.get("publishes", [])) == 0:
+            issues.append({"level": "error", "message": f'[{name}] hat "{key}" has no publishable events'})
+    start_event = preset["event_loop"].get("starting_event")
+    if start_event:
+        if not _find_hat_for_event(start_event, preset):
+            issues.append({"level": "error", "message": f'[{name}] starting_event "{start_event}" no matching hat'})
+    for hat in preset["hats"].values():
+        for event in hat.get("publishes", []):
+            consumer = _find_hat_for_event(event, preset)
+            is_promise = event == preset["event_loop"]["completion_promise"]
+            if not consumer and not is_promise:
+                issues.append({"level": "warning", "message": f'[{name}] event "{event}" from "{hat["name"]}" has no consumer'})
+    promise = preset["event_loop"]["completion_promise"]
+    has_term = any(promise in hat.get("instructions", "") for hat in preset["hats"].values())
+    if not has_term:
+        issues.append({"level": "warning", "message": f'[{name}] no hat mentions "{promise}"'})
+    if len(hat_keys) >= 3:
+        order = {k: i for i, k in enumerate(hat_keys)}
+        loopback = False
+        for hk, hat in preset["hats"].items():
+            for event in hat.get("publishes", []):
+                consumer = _find_hat_for_event(event, preset)
+                if consumer and order.get(consumer, 0) <= order.get(hk, 0):
+                    loopback = True
+        if not loopback:
+            issues.append({"level": "warning", "message": f"[{name}] no loop-back event"})
+    return issues
+
+
+def _infer_event_from_content(text: str, hat: dict) -> str | None:
+    """Safety-net heuristic for multi-event hats."""
+    if len(hat.get("publishes", [])) <= 1:
+        return None
+    lower = text.lower()
+    reject_pats = ["needs fix", "changes requested", "not approved", "fix required",
+        "issues found", "must be fixed", "failed", "cannot approve"]
+    approve_pats = ["lgtm", "looks good", "approved", "all checks pass", "ship it",
+        "ready to commit", "no issues found", "passes"]
+    has_rej = any(p in lower for p in reject_pats)
+    has_app = any(p in lower for p in approve_pats)
+    neg_kw = ["reject", "fail", "change", "request", "block", "error"]
+    pos_kw = ["approve", "pass", "success", "ready", "complete"]
+    def by_kw(kws):
+        for e in hat["publishes"]:
+            if any(k in e.lower() for k in kws):
+                return e
+        return None
+    if has_rej and not has_app:
+        return by_kw(neg_kw) or hat.get("default_publishes")
+    if has_app and not has_rej:
+        return by_kw(pos_kw) or hat.get("default_publishes")
+    return None
+
 def _detect_stale_cycle(history: list) -> bool:
     """Detect when the loop is stuck in a repeating hat cycle.
 
@@ -183,7 +253,140 @@ def _detect_stale_cycle(history: list) -> bool:
     return False
 
 
-# ── Hat Injection (matching pi-ralph's buildHatInjection) ──────────────────────
+# ── Loop Records (persistence) ──────────────────────────────────────────────
+
+def _save_loop_record(state: dict) -> None:
+    """Save loop record to .ralph/loops/. Matches pi-ralph's saveLoopRecord."""
+    if not state.get("start_time"):
+        return
+    loops_dir = Path(state.get("cwd", os.getcwd())) / ".ralph" / "loops"
+    loops_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y-%m-%dT%H-%M-%S", time.gmtime(state["start_time"]))
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", state.get("preset_name", "loop"))
+    path = loops_dir / f"{ts}-{safe}.json"
+    record = {
+        "preset_name": state.get("preset_name"),
+        "prompt": state.get("prompt"),
+        "start_time": state.get("start_time"),
+        "end_time": state.get("end_time", time.time()),
+        "outcome": state.get("end_reason", "unknown"),
+        "iterations": state.get("iteration", 0),
+        "history": [
+            {"hat": h["hat_key"], "event": h["event"], "iteration": h["iteration"]}
+            for h in state.get("history", [])
+        ],
+        "iteration_logs": state.get("iteration_logs", []),
+    }
+    path.write_text(json.dumps(record, indent=2))
+
+
+def _load_loop_records(cwd: str | None = None) -> list[dict]:
+    """Load past loop records from .ralph/loops/."""
+    loops_dir = Path(cwd or os.getcwd()) / ".ralph" / "loops"
+    if not loops_dir.is_dir():
+        return []
+    records = []
+    for f in sorted(loops_dir.glob("*.json"), reverse=True):
+        try:
+            rec = json.loads(f.read_text())
+            if rec.get("start_time") and rec.get("preset_name"):
+                records.append(rec)
+        except Exception:
+            continue
+    return records
+
+
+def _persist_loop_state() -> None:
+    """Persist active loop state to .ralph/state.json."""
+    state = _loop_state
+    if state is None or not state.get("active"):
+        return
+    state_dir = Path(state.get("cwd", os.getcwd())) / ".ralph"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    serializable = {k: v for k, v in state.items() if k != "preset"}
+    serializable["preset_name"] = state.get("preset_name")
+    serializable["event_loop"] = state["preset"]["event_loop"]
+    (state_dir / "state.json").write_text(json.dumps(serializable, indent=2))
+
+
+def _restore_loop_state() -> dict | None:
+    """Restore persisted loop state."""
+    state_path = Path(os.getcwd()) / ".ralph" / "state.json"
+    if not state_path.is_file():
+        return None
+    try:
+        data = json.loads(state_path.read_text())
+        presets = _load_all_presets()
+        pn = data.get("preset_name", "")
+        if pn not in presets:
+            return None
+        data["preset"] = presets[pn]
+        data["loop_triggered_turn"] = data.get("loop_triggered_turn", True)
+        return data
+    except Exception:
+        return None
+
+
+
+# ── PDD Prompt ───────────────────────────────────────────────────────────────
+
+_PDD_PROMPT = """## Prompt-Driven Development (PDD)
+
+Transform a rough idea into a detailed design with an implementation plan.
+
+### Important Rules
+- **User-driven flow:** Never proceed without explicit confirmation.
+- **Record as you go:** Write findings to files in real time.
+- **Planning only:** Produce artifacts. Do NOT implement code.
+
+### Steps
+
+**1. Create Project Structure**
+Derive task_name as kebab-case. Create:
+- `specs/{task_name}/rough-idea.md`
+- `specs/{task_name}/requirements.md`
+- `specs/{task_name}/research/`
+
+Gate: Wait for user confirmation.
+
+**2. Requirements Clarification**
+Ask ONE question at a time. Append each Q&A to requirements.md.
+Ask when requirements are complete.
+
+Gate: Do not proceed without confirmation.
+
+**3. Research**
+Propose a research plan, then investigate. Document findings in research/.
+Check in with user periodically.
+
+Gate: Do not proceed without confirmation.
+
+**4. Iteration Checkpoint**
+Summarize state. Ask: Proceed to design? More requirements? Research?
+
+**5. Create Detailed Design**
+Write `specs/{task_name}/design.md` with:
+- Overview, Requirements, Architecture (Mermaid diagrams)
+- Components, Data Models, Error Handling
+- Acceptance Criteria (Given-When-Then)
+
+Gate: Wait for approval.
+
+**6. Implementation Plan**
+Write `specs/{task_name}/plan.md` — numbered steps.
+Each step: objective, guidance, test requirements.
+
+Gate: Wait for approval.
+
+**7. Summary**
+List all artifacts and next steps.
+
+**8. Offer Ralph Integration**
+Ask: use `/ralph code-assist` or `/ralph spec-driven` for implementation.
+"""
+
+
+# ── Hat Injection ──────────────────────────────────────────────────────
 
 def _extract_next_task(scratchpad_content: str) -> dict | None:
     """Parse a scratchpad task checklist and return info about the next unchecked task."""
@@ -357,6 +560,7 @@ def _start_loop(preset_name: str, prompt: str, preset: dict) -> str:
             "current_hat_key": start_hat_key,
             "iteration": 1,
             "start_time": time.time(),
+            "pending_kickoff": True,
             "prompt": prompt,
             "active": True,
             "paused": False,
@@ -369,6 +573,7 @@ def _start_loop(preset_name: str, prompt: str, preset: dict) -> str:
         }
 
     _update_widget()
+    _persist_loop_state()
 
     # Steer the initial hat message (matches pi-ralph's sendHatMessage)
     hat = preset["hats"][start_hat_key]
@@ -394,7 +599,14 @@ def _stop_loop(reason: str) -> None:
 
     # Save loop record
     state["active"] = False
+    state["end_time"] = time.time()
+    _save_loop_record(state)
     _update_widget()
+
+    # Clean up state file
+    state_path = Path(state.get("cwd", os.getcwd())) / ".ralph" / "state.json"
+    if state_path.exists():
+        state_path.unlink()
 
     _loop_state = None
 
@@ -418,6 +630,10 @@ def _determine_next_action(ctx: dict) -> dict:
     # Skip: loop is paused
     if ctx.get("paused"):
         return {"type": "skip", "reason": "paused"}
+
+    # Skip: pending kickoff (first turn after start)
+    if ctx.get("pending_kickoff"):
+        return {"type": "skip", "reason": "pending-kickoff"}
 
     # Complete: completion promise found
     if ctx.get("completion_found"):
@@ -469,7 +685,10 @@ def _determine_next_action(ctx: dict) -> dict:
 # ── Hooks ──────────────────────────────────────────────────────────────────────
 
 def _on_turn_start(ctx: dict) -> str | None:
-    """Inject hat instructions — matches pi-ralph's before_agent_start handler."""
+    """Inject hat instructions or PDD prompt."""
+    if _plan_active:
+        return _PDD_PROMPT
+
     state = _loop_state
     if state is None or not state.get("active"):
         return None
@@ -521,6 +740,8 @@ def _on_turn_end(ctx: dict) -> None:
                 break
         if published_event is None and current_hat.get("default_publishes"):
             published_event = current_hat["default_publishes"]
+        if published_event is None:
+            published_event = _infer_event_from_content(text, current_hat)
 
     # Capture iteration log
     def _capture_iteration_log(event_name: str):
@@ -556,6 +777,8 @@ def _on_turn_end(ctx: dict) -> None:
     if action["type"] == "skip":
         if action.get("reason") == "user-turn":
             state["loop_triggered_turn"] = True  # Re-arm
+        elif action.get("reason") == "pending-kickoff":
+            state["pending_kickoff"] = False
         return
 
     if action["type"] == "complete":
@@ -588,6 +811,7 @@ def _on_turn_end(ctx: dict) -> None:
         })
 
         _update_widget()
+        _persist_loop_state()
 
         # Steer next hat message
         next_hat = preset["hats"][next_hat_key]
@@ -682,6 +906,36 @@ def _ralph_command(app, arg: str) -> None:
     app._append(f"[accent]Ralph loop started:[/] {preset_name} — {prompt}")
 
 
+
+# ── PDD /plan command ──────────────────────────────────────────────────────
+
+def _plan_command(app, arg: str) -> None:
+    """Handle /plan <idea>."""
+    global _plan_active
+    if _loop_state and _loop_state.get("active"):
+        app._append("[yellow]A Ralph loop is active. Use /ralph stop first.[/]")
+        return
+    idea = (arg or "").strip()
+    if not idea:
+        app._append("[yellow]Usage: /plan <rough idea>[/]")
+        return
+    _plan_active = True
+    # Inject PDD prompt via steer — the turn_start hook will inject it next turn
+    msg = f"[PDD Planning] Transform this idea:\n\n{idea}\n\n{_PDD_PROMPT}"
+    try:
+        _do_steer(msg)
+    except Exception:
+        pass
+    app._append(f"[accent]PDD session started for:[/] {idea}")
+
+
+def _on_plan_turn_start(ctx: dict) -> str | None:
+    """Inject PDD prompt when plan mode is active."""
+    if not _plan_active:
+        return None
+    return _PDD_PROMPT
+
+
 # ── Tool ───────────────────────────────────────────────────────────────────────
 
 def _start_loop_tool(args, cwd=None, cancel=None) -> str:
@@ -708,6 +962,11 @@ def register(api) -> None:
         "start <preset> <prompt>": "start a loop with a preset and task prompt",
         "stop": "stop the current loop",
         "status": "show current loop status",
+        "pause": "pause the loop",
+        "resume": "resume the loop",
+        "steer <msg>": "send guidance to current hat",
+        "history": "show iteration logs",
+        "loops": "browse past loop records",
         "presets": "list available presets",
     })
 
@@ -739,5 +998,8 @@ def register(api) -> None:
     if hasattr(api, "on"):
         api.on("turn_start", _on_turn_start)
         api.on("turn_end", _on_turn_end)
+        api.command("/plan", "Start a PDD planning session", _plan_command, sub={
+            "<idea>": "a rough idea to refine into a plan",
+        })
 
     _update_widget()
