@@ -1,0 +1,72 @@
+# Review Preset: Systematic code review pipeline
+# Explorer → Reviewer → Reporter
+#
+# Usage: /ralph review Review the authentication module
+
+event_loop:
+  starting_event: "review.start"
+  completion_promise: "REVIEW_COMPLETE"
+  max_iterations: 20
+  max_runtime_seconds: 3600
+
+hats:
+  explorer:
+    name: "🔎 Explorer"
+    description: "Maps the codebase area to review."
+    triggers: ["review.start"]
+    publishes: ["exploration.done"]
+    default_publishes: "exploration.done"
+    instructions: |
+      ## EXPLORER MODE
+
+      Map the codebase area that needs review.
+
+      ### Process
+      1. Find all relevant files
+      2. Understand the architecture
+      3. Document scope in `.ralph/review.md`
+
+      ### DON'T
+      - ❌ Start reviewing before mapping is complete
+
+  reviewer:
+    name: "🔍 Reviewer"
+    description: "Thorough code review of the identified area."
+    triggers: ["exploration.done"]
+    publishes: ["review.done"]
+    default_publishes: "review.done"
+    instructions: |
+      ## REVIEWER MODE
+
+      Review the code systematically.
+
+      ### Checklist
+      1. Correctness — does the code do what it should?
+      2. Edge cases — are they handled?
+      3. Error handling — are errors caught and reported?
+      4. Security — any vulnerabilities?
+      5. Performance — any obvious bottlenecks?
+      6. Style — follows project conventions?
+      7. Tests — adequate coverage?
+
+      Document findings in `.ralph/review.md`.
+
+      ### DON'T
+      - ❌ Rewrite code during review
+      - ❌ Skip any checklist item
+
+  reporter:
+    name: "📝 Reporter"
+    description: "Compiles review findings into a structured report."
+    triggers: ["review.done"]
+    publishes: []
+    instructions: |
+      ## REPORTER MODE
+
+      Compile review findings into a structured report.
+
+      ### Process
+      1. Read `.ralph/review.md`
+      2. Organize findings by severity
+      3. Output the full report
+      4. Output `<<< REVIEW_COMPLETE >>>`

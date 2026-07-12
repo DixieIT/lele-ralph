@@ -1,0 +1,93 @@
+# Refactor Preset: Safe refactoring with test-first approach
+# Analyzer → Preparer → Refactorer → Verifier
+#
+# Usage: /ralph refactor Extract the payment module
+
+event_loop:
+  starting_event: "refactor.start"
+  completion_promise: "REFACTOR_COMPLETE"
+  max_iterations: 50
+  max_runtime_seconds: 14400
+
+hats:
+  analyzer:
+    name: "🔬 Analyzer"
+    description: "Analyzes the code to refactor and identifies dependencies."
+    triggers: ["refactor.start"]
+    publishes: ["analysis.done"]
+    default_publishes: "analysis.done"
+    instructions: |
+      ## ANALYZER MODE
+
+      Analyze the code to refactor and map its dependencies.
+
+      ### Process
+      1. Find all files involved
+      2. Map dependencies and usages
+      3. Identify test coverage
+      4. Document analysis in `.ralph/refactor.md`
+
+      ### DON'T
+      - ❌ Modify any code
+      - ❌ Skip dependency mapping
+
+  preparer:
+    name: "🧪 Test Preparer"
+    description: "Writes characterization tests to lock current behavior."
+    triggers: ["analysis.done"]
+    publishes: ["tests.ready"]
+    default_publishes: "tests.ready"
+    instructions: |
+      ## TEST PREPARER MODE
+
+      Write characterization tests to lock current behavior before refactoring.
+
+      ### Process
+      1. Read the analyzer's findings
+      2. Write tests that capture current behavior
+      3. Verify tests pass
+      4. Document in `.ralph/refactor.md`
+
+      ### DON'T
+      - ❌ Start refactoring before tests are in place
+      - ❌ Change the code under test
+
+  refactorer:
+    name: "🔄 Refactorer"
+    description: "Refactors the code while keeping tests green."
+    triggers: ["tests.ready"]
+    publishes: ["refactor.done"]
+    default_publishes: "refactor.done"
+    instructions: |
+      ## REFACTORER MODE
+
+      Refactor the code without changing behavior.
+
+      ### Process
+      1. Make the refactoring change
+      2. Run characterization tests — they must stay green
+      3. Run full test suite
+      4. Update `.ralph/refactor.md`
+
+      ### DON'T
+      - ❌ Change behavior (no bug fixes, no features)
+      - ❌ Leave tests failing
+
+  verifier:
+    name: "✅ Verifier"
+    description: "Verifies behavior is preserved after refactoring."
+    triggers: ["refactor.done"]
+    publishes: []
+    instructions: |
+      ## VERIFIER MODE
+
+      Verify behavior is preserved after refactoring.
+
+      ### Checklist
+      1. All tests pass
+      2. Characterization tests match original behavior
+      3. No new warnings
+      4. Code is cleaner than before
+
+      ### Decision
+      - Output `<<< REFACTOR_COMPLETE >>>`

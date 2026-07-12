@@ -1,0 +1,100 @@
+# Spec-Driven: Spec-first development
+# Specifier → Implementer → Verifier → Committer
+#
+# Usage: /ralph spec-driven Create a rate limiting middleware
+
+event_loop:
+  starting_event: "spec.start"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 50
+  max_runtime_seconds: 14400
+
+hats:
+  specifier:
+    name: "📐 Specifier"
+    description: "Turns requirements into detailed specs with acceptance criteria."
+    triggers: ["spec.start"]
+    publishes: ["spec.ready"]
+    default_publishes: "spec.ready"
+    instructions: |
+      ## SPECIFIER MODE
+
+      Turn the requirements into a detailed spec.
+
+      ### Process
+      1. Understand the requirements
+      2. Define API/interface contracts
+      3. Write acceptance criteria with examples
+      4. Write specs to `.ralph/spec.md`
+
+      ### DON'T
+      - ❌ Start implementing
+      - ❌ Write vague acceptance criteria
+
+  implementer:
+    name: "⚙️ Implementer"
+    description: "Implements ONE spec item with tests."
+    triggers: ["spec.ready", "spec.violated"]
+    publishes: ["implementation.done"]
+    default_publishes: "implementation.done"
+    single_task: true
+    instructions: |
+      ## IMPLEMENTER MODE
+
+      Implement ONE spec item using TDD.
+
+      ### Process
+      1. Read the spec
+      2. RED — Write failing test per acceptance criteria
+      3. GREEN — Implement to pass
+      4. REFACTOR — Clean up
+      5. VERIFY — Run full suite
+      6. Update `.ralph/spec.md` progress
+
+      ### If Triggered by spec.violated
+      Fix the specific violations the Verifier found.
+      Do NOT move to the next item.
+
+      ### DON'T
+      - ❌ Implement more than one item per cycle
+      - ❌ Skip tests
+
+  verifier:
+    name: "✅ Spec Verifier"
+    description: "Verifies implementation matches spec exactly."
+    triggers: ["implementation.done"]
+    publishes: ["verification.passed", "spec.violated"]
+    default_publishes: "verification.passed"
+    instructions: |
+      ## SPEC VERIFIER MODE
+
+      Verify the implementation matches the spec exactly.
+
+      ### Process
+      1. Run tests for each acceptance criterion
+      2. Manually verify with spec examples
+      3. Check edge cases
+
+      ### Decision
+      - **All criteria pass**: publish `verification.passed`
+      - **Violations found**: publish `spec.violated` with specifics
+
+  committer:
+    name: "📦 Committer"
+    description: "Commits the current task. Routes back to implementer if more remain."
+    triggers: ["verification.passed"]
+    publishes: ["tasks.next"]
+    default_publishes: "tasks.next"
+    instructions: |
+      ## COMMITTER MODE
+
+      Commit the current task, then check if more remain.
+
+      ### Process
+      1. `git status` / `git diff` to review
+      2. Stage and commit with conventional format
+      3. Mark item complete on `.ralph/spec.md`
+
+      ### Decision
+      - **More items** remain: publish `tasks.next`
+      - **All done**: output `<<< LOOP_COMPLETE >>>`

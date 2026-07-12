@@ -1,0 +1,112 @@
+# Code-Assist: Full TDD Implementation Pipeline
+# Planner → Builder → Validator → Committer, looping until all tasks done
+#
+# Usage: /ralph code-assist Add input validation to the /users endpoint
+
+event_loop:
+  starting_event: "build.start"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 100
+  max_runtime_seconds: 14400
+
+core:
+  guardrails:
+    - "Verification is mandatory — tests/typecheck/lint must pass"
+    - "YAGNI ruthlessly — no speculative features"
+    - "KISS always — simplest solution that works"
+
+hats:
+  planner:
+    name: "📋 Planner"
+    description: "Explores codebase and creates implementation plan."
+    triggers: ["build.start"]
+    publishes: ["tasks.ready"]
+    default_publishes: "tasks.ready"
+    instructions: |
+      ## PLANNER MODE
+
+      Explore the codebase and create an implementation plan.
+
+      ### Process
+      1. Analyze the task requirements
+      2. Search codebase for relevant patterns
+      3. Identify files to create/modify
+      4. Create a numbered implementation plan
+      5. Write task checklist to `.ralph/scratchpad.md`
+
+      ### DON'T
+      - ❌ Start implementing — just plan
+      - ❌ Create overly complex plans
+      - ❌ Skip codebase exploration
+
+  builder:
+    name: "⚙️ Builder"
+    description: "TDD implementation of ONE task: RED → GREEN → REFACTOR."
+    triggers: ["tasks.ready", "validation.failed"]
+    publishes: ["implementation.ready"]
+    default_publishes: "implementation.ready"
+    single_task: true
+    instructions: |
+      ## BUILDER MODE — TDD Cycle (SINGLE TASK)
+
+      Implement ONLY one task using strict TDD.
+
+      ### Process
+      1. Read scratchpad for context
+      2. RED — Write failing tests first
+      3. GREEN — Write minimal code to make tests pass
+      4. REFACTOR — Clean up while keeping tests green
+      5. VERIFY — Run full test suite
+      6. UPDATE SCRATCHPAD — Add notes about what you did
+
+      ### If Triggered by validation.failed
+      Fix the specific issues the Validator identified.
+      Do NOT move to the next task.
+
+      ### DON'T
+      - ❌ Implement more than one task per cycle
+      - ❌ Write implementation before tests
+      - ❌ Skip the refactor step
+
+  validator:
+    name: "✅ Validator"
+    description: "Exhaustive quality gate with YAGNI/KISS checks."
+    triggers: ["implementation.ready"]
+    publishes: ["validation.passed", "validation.failed"]
+    default_publishes: "validation.passed"
+    instructions: |
+      ## VALIDATOR MODE — Quality Gate
+
+      Be thorough and skeptical.
+
+      ### Checklist
+      1. All tests pass (run them yourself)
+      2. Build succeeds with no errors
+      3. Linting & type checking pass
+      4. YAGNI: no code that isn't directly required
+      5. KISS: simplest solution that works
+      6. Matches codebase patterns
+
+      ### Decision
+      - **PASS**: all checks pass → publish `validation.passed`
+      - **FAIL**: any check fails → publish `validation.failed` with specifics
+
+  committer:
+    name: "📦 Committer"
+    description: "Commits the current task. Routes back to builder if more tasks remain."
+    triggers: ["validation.passed"]
+    publishes: ["tasks.ready"]
+    default_publishes: "tasks.ready"
+    instructions: |
+      ## COMMITTER MODE
+
+      Commit the current task, then check if more tasks remain.
+
+      ### Process
+      1. `git status` / `git diff` to review
+      2. Stage and commit with conventional format
+      3. Mark task `- [x]` on scratchpad
+
+      ### Decision
+      - **More tasks** (`- [ ]` remain): publish `tasks.ready`
+      - **All done**: output `<<< LOOP_COMPLETE >>>`

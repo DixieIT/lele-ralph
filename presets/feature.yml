@@ -1,0 +1,118 @@
+# Feature Preset: Plan → Build → Review → Commit
+# Standard feature development pipeline.
+#
+# Usage: /ralph feature Add user authentication with JWT
+
+event_loop:
+  starting_event: "build.start"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 50
+  max_runtime_seconds: 14400
+
+core:
+  guardrails:
+    - "Tests must pass before committing"
+    - "Follow existing code patterns"
+    - "YAGNI — no speculative features"
+
+hats:
+  planner:
+    name: "📋 Planner"
+    description: "Explores the codebase and creates an implementation plan."
+    triggers: ["build.start"]
+    publishes: ["tasks.ready"]
+    default_publishes: "tasks.ready"
+    instructions: |
+      ## PLANNER MODE
+
+      Analyze the task and create a numbered implementation plan.
+
+      ### Process
+      1. Understand the requirements
+      2. Search the codebase for relevant patterns
+      3. Identify files to create or modify
+      4. Create a checklist on the scratchpad
+
+      ### Scratchpad Format
+      Write tasks to `.ralph/scratchpad.md`:
+      ```
+      ## Tasks
+      - [ ] 1. First task
+      - [ ] 2. Second task
+      ```
+
+      ### DON'T
+      - ❌ Start implementing
+      - ❌ Create overly complex plans
+
+  builder:
+    name: "⚙️ Builder"
+    description: "Implements ONE task from the plan with TDD."
+    triggers: ["tasks.ready", "review.changes_requested"]
+    publishes: ["build.done"]
+    default_publishes: "build.done"
+    single_task: true
+    instructions: |
+      ## BUILDER MODE
+
+      Implement ONE task from the plan. Use TDD: RED → GREEN → REFACTOR.
+
+      ### Process
+      1. Read the scratchpad for context
+      2. Write tests first (RED)
+      3. Implement minimal code (GREEN)
+      4. Refactor while keeping tests green
+      5. Run full test suite
+      6. Update scratchpad with notes
+
+      ### If Triggered by review.changes_requested
+      Fix the specific issues the Reviewer identified.
+      Do not move to the next task — fix the current one.
+
+      ### DON'T
+      - ❌ Implement more than one task per cycle
+      - ❌ Skip tests
+
+  reviewer:
+    name: "🔍 Reviewer"
+    description: "Reviews implementation for correctness, style, and edge cases."
+    triggers: ["build.done"]
+    publishes: ["review.approved", "review.changes_requested"]
+    default_publishes: "review.approved"
+    instructions: |
+      ## REVIEWER MODE
+
+      Review the implementation thoroughly.
+
+      ### Checklist
+      1. Tests pass
+      2. Code follows project patterns
+      3. No dead code or debug artifacts
+      4. Edge cases handled
+      5. YAGNI & KISS respected
+      6. No security issues
+
+      ### Decision
+      - **Approved**: All checks pass → publish `review.approved`
+      - **Changes needed**: Specific issues → publish `review.changes_requested`
+        with details on what to fix
+
+  committer:
+    name: "📦 Committer"
+    description: "Commits the task and checks if more remain."
+    triggers: ["review.approved"]
+    publishes: ["tasks.ready"]
+    default_publishes: "tasks.ready"
+    instructions: |
+      ## COMMITTER MODE
+
+      Commit the current task, then check if more tasks remain.
+
+      ### Process
+      1. `git status` / `git diff` to review
+      2. Stage and commit with conventional format
+      3. Mark task `- [x]` on scratchpad
+
+      ### Decision
+      - **More tasks** (`- [ ]` remain): publish `tasks.ready`
+      - **All done**: output `<<< LOOP_COMPLETE >>>` on its own line

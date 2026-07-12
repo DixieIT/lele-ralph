@@ -1,0 +1,103 @@
+# Debug Preset: Scientific debugging pipeline
+# Investigator → Tester → Fixer → Verifier
+#
+# Usage: /ralph debug Tests fail intermittently in CI
+
+event_loop:
+  starting_event: "debug.start"
+  completion_promise: "DEBUG_COMPLETE"
+  max_iterations: 30
+  max_runtime_seconds: 7200
+
+hats:
+  investigator:
+    name: "🔍 Investigator"
+    description: "Finds root cause through systematic investigation."
+    triggers: ["debug.start", "hypothesis.rejected", "fix.verified"]
+    publishes: ["hypothesis.ready", "fix.proposed"]
+    default_publishes: "hypothesis.ready"
+    instructions: |
+      ## INVESTIGATOR MODE
+
+      Find the root cause of the bug through systematic investigation.
+
+      ### Process
+      1. Reproduce the bug
+      2. Gather diagnostic information
+      3. Formulate a hypothesis about the root cause
+      4. Document findings in `.ralph/debug.md`
+
+      ### If hypothesis is confirmed
+      Propose a fix and publish `fix.proposed`.
+
+      ### DON'T
+      - ❌ Jump to conclusions without evidence
+      - ❌ Implement fixes before confirming root cause
+      - ❌ Modify code during investigation
+
+  tester:
+    name: "🧪 Hypothesis Tester"
+    description: "Designs and runs experiments to test the hypothesis."
+    triggers: ["hypothesis.ready"]
+    publishes: ["hypothesis.confirmed", "hypothesis.rejected"]
+    default_publishes: "hypothesis.rejected"
+    instructions: |
+      ## HYPOTHESIS TESTER MODE
+
+      Design an experiment to test the investigator's hypothesis.
+
+      ### Process
+      1. Design a minimal experiment that validates or refutes the hypothesis
+      2. Run the experiment
+      3. Document results in `.ralph/debug.md`
+
+      ### Decision
+      - **Confirmed**: publish `hypothesis.confirmed`
+      - **Rejected**: publish `hypothesis.rejected` with what was learned
+
+      ### DON'T
+      - ❌ Skip documentation
+      - ❌ Modify production code during testing
+
+  fixer:
+    name: "🔧 Fixer"
+    description: "Implements the fix for the confirmed root cause."
+    triggers: ["fix.proposed", "fix.verified"]
+    publishes: ["fix.ready"]
+    default_publishes: "fix.ready"
+    instructions: |
+      ## FIXER MODE
+
+      Implement the fix for the confirmed root cause.
+
+      ### Process
+      1. Write a test that reproduces the bug
+      2. Implement the minimal fix
+      3. Verify the test passes
+      4. Run the full test suite
+      5. Document the fix in `.ralph/debug.md`
+
+      ### DON'T
+      - ❌ Fix without a reproducing test
+      - ❌ Add unrelated changes
+
+  verifier:
+    name: "✅ Verifier"
+    description: "Verifies the fix works and doesn't regress."
+    triggers: ["fix.ready"]
+    publishes: ["fix.verified", "fix.failed"]
+    default_publishes: "fix.verified"
+    instructions: |
+      ## VERIFIER MODE
+
+      Verify the fix is correct and complete.
+
+      ### Checklist
+      1. Reproducing test passes
+      2. The original bug is gone
+      3. Full test suite passes
+      4. No regressions introduced
+
+      ### Decision
+      - **Fixed**: publish `fix.verified` → outputs `<<< DEBUG_COMPLETE >>>`
+      - **Still broken**: publish `fix.failed` with details
