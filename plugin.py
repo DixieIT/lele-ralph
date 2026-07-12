@@ -27,6 +27,7 @@ Presets loaded from (project overrides user overrides built-in):
 
 import os
 import re
+import shutil
 import time
 import threading
 from pathlib import Path
@@ -45,6 +46,7 @@ LEGACY_EVENT_RE = re.compile(r">>>\s*EVENT:\s*(\S+)")
 
 _loop_state: dict | None = None
 _widget = None
+_api = None  # set by register()
 _lock = threading.Lock()
 _do_steer = lambda _: None  # set by register()
 _plan_active = False
@@ -828,6 +830,173 @@ def _on_turn_end(ctx: dict) -> None:
             log.warning("ralph: steer failed: %s", exc)
 
 
+# ── History / Loops overlays ────────────────────────────────────────────────
+# Matches pi-ralph's ctx.ui.custom(...) browsers (index.ts ~488-575, ~577-720+):
+# arrow-key navigation over the same render(width)/handle_input(key)/done(result)
+# contract lele's api.overlay() already exposes (see doom's plugin for the other
+# real user of it in this codebase).
+
+def _popup_size() -> tuple[int, int]:
+    cols, rows = shutil.get_terminal_size()
+    return min(100, int(cols * 0.8)), min(32, int((rows - 4) * 0.8))
+
+
+def _format_duration(seconds: float) -> str:
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s}s"
+    m, rem = divmod(s, 60)
+    return f"{m}m{rem}s"
+
+
+_LOG_MAX_VISIBLE = 16
+
+
+def _render_iteration_log(log: dict, idx: int, total: int, scroll: int) -> tuple[list[str], int]:
+    """Renders one iteration log entry, clamping `scroll` to its valid range.
+    Returns (lines, clamped_scroll) — the caller stores the clamped value back."""
+    summary_lines = str(log.get("summary", "")).split("\n")
+    max_scroll = max(0, len(summary_lines) - _LOG_MAX_VISIBLE)
+    scroll = min(scroll, max_scroll)
+
+    lines = [
+        f"[bold accent]Iteration {log['iteration']}[/] [dim]({idx + 1}/{total})[/]",
+        "",
+        f"[dim]Hat:[/] {log.get('hat_name', log.get('hat_key', '?'))}",
+        f"[dim]Event:[/] {log.get('event', '?')}",
+        f"[dim]Time:[/] {time.strftime('%H:%M:%S', time.localtime(log.get('timestamp', 0)))}",
+        "",
+    ]
+    visible = summary_lines[scroll:scroll + _LOG_MAX_VISIBLE]
+    lines.extend(visible)
+    if len(summary_lines) > _LOG_MAX_VISIBLE:
+        lines.append("")
+        end = min(scroll + _LOG_MAX_VISIBLE, len(summary_lines))
+        lines.append(f"[dim][{scroll + 1}-{end}/{len(summary_lines)} lines][/]")
+    return lines, scroll
+
+
+class _HistoryOverlay:
+    """/ralph history — browse the CURRENT loop's iteration logs."""
+
+    def __init__(self, logs: list[dict]):
+        self.done = lambda _: None
+        self.popup_size = _popup_size()
+        self._logs = logs
+        self._idx = len(logs) - 1
+        self._scroll = 0
+
+    def render(self, width: int) -> list[str]:
+        lines, self._scroll = _render_iteration_log(self._logs[self._idx], self._idx, len(self._logs), self._scroll)
+        lines.append("")
+        lines.append("[dim]←/→ iteration • ↑/↓ scroll • esc close[/]")
+        return lines
+
+    def handle_input(self, key: str) -> None:
+        if key == "left" and self._idx > 0:
+            self._idx -= 1
+            self._scroll = 0
+        elif key == "right" and self._idx < len(self._logs) - 1:
+            self._idx += 1
+            self._scroll = 0
+        elif key == "up":
+            self._scroll = max(0, self._scroll - 1)
+        elif key == "down":
+            self._scroll += 1
+
+
+class _LoopsOverlay:
+    """/ralph loops — browse past loop records: a list (↑/↓ select, enter to
+    view), and per-record iteration-log detail (←/→ between logs, esc back)."""
+
+    esc_closes = False
+
+    def __init__(self, records: list[dict]):
+        self.done = lambda _: None
+        self.popup_size = _popup_size()
+        self._records = records
+        self._selected = 0
+        self._list_scroll = 0
+        self._detail = False
+        self._log_idx = 0
+        self._log_scroll = 0
+
+    def _render_list(self) -> list[str]:
+        lines = [f"[bold accent]Past Ralph Loops[/] [dim]({len(self._records)})[/]", ""]
+        max_visible = 12
+        max_scroll = max(0, len(self._records) - max_visible)
+        self._list_scroll = min(self._list_scroll, max_scroll)
+        visible = self._records[self._list_scroll:self._list_scroll + max_visible]
+        for i, r in enumerate(visible):
+            idx = self._list_scroll + i
+            cursor = "▸" if idx == self._selected else " "
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("start_time", 0)))
+            dur = _format_duration(r.get("end_time", 0) - r.get("start_time", 0))
+            outcome = str(r.get("outcome", "unknown"))
+            lines.append(f"{cursor} {r.get('preset_name', '?')} "
+                         f"[dim]— {when} — {dur} — {r.get('iterations', 0)} iters[/]")
+            lines.append(f"  {outcome} [dim]— {str(r.get('prompt', ''))[:80]}[/]")
+        lines.append("")
+        lines.append("[dim]↑/↓ select • enter view • esc close[/]")
+        return lines
+
+    def _render_detail(self) -> list[str]:
+        record = self._records[self._selected]
+        logs = record.get("iteration_logs", [])
+        lines = [
+            f"[bold accent]{record.get('preset_name', '?')}[/] "
+            f"[dim]— {time.strftime('%Y-%m-%d %H:%M', time.localtime(record.get('start_time', 0)))}[/]",
+            f"[dim]Prompt:[/] {str(record.get('prompt', ''))[:80]}",
+            f"[dim]Outcome:[/] {record.get('outcome', 'unknown')}",
+            f"[dim]Duration:[/] {_format_duration(record.get('end_time', 0) - record.get('start_time', 0))}"
+            f" [dim]— {record.get('iterations', 0)} iterations[/]",
+            "",
+        ]
+        if not logs:
+            lines.append("[dim]No iteration logs recorded.[/]")
+        else:
+            log_lines, self._log_scroll = _render_iteration_log(
+                logs[self._log_idx], self._log_idx, len(logs), self._log_scroll)
+            lines.extend(log_lines)
+        lines.append("")
+        lines.append("[dim]←/→ iteration • ↑/↓ scroll • esc back[/]")
+        return lines
+
+    def render(self, width: int) -> list[str]:
+        return self._render_detail() if self._detail else self._render_list()
+
+    def handle_input(self, key: str) -> None:
+        if key == "escape":
+            if self._detail:
+                self._detail = False
+                self._log_idx = 0
+                self._log_scroll = 0
+            else:
+                self.done(None)
+            return
+        if not self._detail:
+            if key == "up" and self._selected > 0:
+                self._selected -= 1
+            elif key == "down" and self._selected < len(self._records) - 1:
+                self._selected += 1
+            elif key == "enter":
+                self._detail = True
+                self._log_idx = 0
+                self._log_scroll = 0
+            return
+        logs = self._records[self._selected].get("iteration_logs", [])
+        if key == "left" and self._log_idx > 0:
+            self._log_idx -= 1
+            self._log_scroll = 0
+        elif key == "right" and self._log_idx < len(logs) - 1:
+            self._log_idx += 1
+            self._log_scroll = 0
+        elif key == "up":
+            self._log_scroll = max(0, self._log_scroll - 1)
+        elif key == "down":
+            self._log_scroll += 1
+
+
 # ── Command ────────────────────────────────────────────────────────────────────
 
 def _ralph_command(app, arg: str) -> None:
@@ -857,6 +1026,72 @@ def _ralph_command(app, arg: str) -> None:
             )
         else:
             app._append("[dim]No active Ralph loop.[/]")
+        return
+
+    if cmd == "steer":
+        msg = rest.strip()
+        if not msg:
+            app._append("[yellow]Usage: /ralph steer <message>[/]")
+            return
+        if not (_loop_state and _loop_state.get("active")):
+            app._append("[yellow]No active loop to steer.[/]")
+            return
+        # Feeds state["steering"], read + cleared by _build_hat_injection/_on_turn_start
+        # (that half already existed — nothing ever appended to it until now). Not
+        # api.steer(): that injects into the live conversation, which a hat-transition
+        # context reset would just discard — this needs to survive in plugin state.
+        _loop_state.setdefault("steering", []).append(msg)
+        app._append(f"[accent]Steering queued[/] ({len(_loop_state['steering'])} pending). "
+                    f"Will be injected into the next hat.")
+        return
+
+    if cmd == "pause":
+        if not (_loop_state and _loop_state.get("active")):
+            app._append("[yellow]No active loop to pause.[/]")
+            return
+        if _loop_state.get("paused"):
+            app._append("[dim]Loop is already paused.[/]")
+            return
+        _loop_state["paused"] = True
+        _update_widget()
+        _persist_loop_state()
+        app._append("[accent]⏸ Loop paused.[/] The loop will not auto-continue after this turn. "
+                    "Use /ralph resume to continue, or send any message.")
+        return
+
+    if cmd == "resume":
+        if not (_loop_state and _loop_state.get("active")):
+            app._append("[yellow]No active loop to resume.[/]")
+            return
+        if not _loop_state.get("paused"):
+            app._append("[dim]Loop is not paused.[/]")
+            return
+        _loop_state["paused"] = False
+        _update_widget()
+        _persist_loop_state()
+        app._append("[accent]▶ Loop resumed.[/] Will continue after this turn completes.")
+        return
+
+    if cmd == "history":
+        if _loop_state is None:
+            app._append("[dim]No loop state available.[/]")
+            return
+        logs = _loop_state.get("iteration_logs", [])
+        if not logs:
+            app._append("[dim]No iteration history yet.[/]")
+            return
+        if _api is not None:
+            _api.overlay(_HistoryOverlay(logs))
+        return
+
+    if cmd == "loops":
+        cwd = _loop_state.get("cwd", os.getcwd()) if _loop_state else os.getcwd()
+        records = _load_loop_records(cwd)
+        if not records:
+            app._append("[dim]No past loops found.[/]")
+            return
+        if _api is not None:
+            _api.overlay(_LoopsOverlay(records))
         return
 
     if cmd == "presets":
@@ -953,8 +1188,9 @@ def _start_loop_tool(args, cwd=None, cancel=None) -> str:
 # ── Register ───────────────────────────────────────────────────────────────────
 
 def register(api) -> None:
-    global _widget, _do_steer
+    global _widget, _do_steer, _api
 
+    _api = api
     _do_steer = api.steer if hasattr(api, "steer") else lambda _: None
     _widget = api.widget("ralph-loop")
 
