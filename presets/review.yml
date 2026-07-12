@@ -69,4 +69,4 @@ hats:
       1. Read `.ralph/review.md`
       2. Organize findings by severity
       3. Output the full report
-      4. Output `<<< REVIEW_COMPLETE >>>`
+      4. Output `REVIEW_COMPLETE`

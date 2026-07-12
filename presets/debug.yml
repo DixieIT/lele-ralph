@@ -99,5 +99,5 @@ hats:
       4. No regressions introduced
 
       ### Decision
-      - **Fixed**: publish `fix.verified` → outputs `<<< DEBUG_COMPLETE >>>`
+      - **Fixed**: publish `fix.verified` → outputs `DEBUG_COMPLETE`
       - **Still broken**: publish `fix.failed` with details

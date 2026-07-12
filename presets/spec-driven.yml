@@ -97,4 +97,4 @@ hats:
 
       ### Decision
       - **More items** remain: publish `tasks.next`
-      - **All done**: output `<<< LOOP_COMPLETE >>>`
+      - **All done**: output `LOOP_COMPLETE`

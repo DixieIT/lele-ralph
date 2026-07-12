@@ -90,4 +90,4 @@ hats:
       4. Code is cleaner than before
 
       ### Decision
-      - Output `<<< REFACTOR_COMPLETE >>>`
+      - Output `REFACTOR_COMPLETE`

@@ -109,4 +109,4 @@ hats:
 
       ### Decision
       - **More tasks** (`- [ ]` remain): publish `tasks.ready`
-      - **All done**: output `<<< LOOP_COMPLETE >>>`
+      - **All done**: output `LOOP_COMPLETE`
